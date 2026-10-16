@@ -1,0 +1,21 @@
+{
+  "name": "tents-puzzle",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "gen": "esbuild scripts/gen-puzzles.mts --bundle --format=esm --platform=node --outfile=scripts/gen-puzzles.mjs && node scripts/gen-puzzles.mjs",
+    "check": "esbuild scripts/check.mts --bundle --format=esm --platform=node --outfile=scripts/check.mjs && node scripts/check.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}
