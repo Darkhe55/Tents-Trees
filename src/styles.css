@@ -10,7 +10,8 @@
   --trunk: #8a5a2b;
   --tent: #c45c26;
   --tent-dark: #9c4618;
-  --grass: #b3a98f;
+  /* 地面浅绿：与树冠绿区分，标记已定的格子（树 / 帐篷 / 草地） */
+  --ground: #d9e9c9;
   --num: #2a2722;
   --error: #c23b2e;
   --error-soft: #f0d7d3;
@@ -292,6 +293,11 @@ button.btn:disabled {
   stroke-width: 1.2;
 }
 
+/* 已定格（树 / 帐篷 / 草地）的地面底色；空格不带 */
+.board-svg .cell.ground {
+  fill: var(--ground);
+}
+
 .board-svg .cell-hover {
   fill: rgba(47, 125, 74, 0.1);
   pointer-events: none;
@@ -337,11 +343,6 @@ button.btn:disabled {
   fill: var(--tent-dark);
 }
 
-.board-svg .grass {
-  fill: var(--grass);
-  pointer-events: none;
-}
-
 .board-svg .clue {
   fill: var(--num);
   font-family: var(--font);
@@ -353,13 +354,6 @@ button.btn:disabled {
 
 .board-svg .clue.bad {
   fill: var(--error);
-}
-
-.footer-note {
-  margin-top: 18px;
-  color: var(--ink-soft);
-  font-size: 12px;
-  text-align: center;
 }
 
 /* ——— 自定义题板 ——— */
@@ -458,10 +452,6 @@ button.btn:disabled {
 
 .board-svg .tent.fx-glow {
   filter: drop-shadow(0 0 9px rgba(196, 92, 38, 0.8));
-}
-
-.board-svg .grass.fx-glow {
-  filter: drop-shadow(0 0 6px rgba(138, 91, 43, 0.7));
 }
 
 .board-svg .fx-pop {

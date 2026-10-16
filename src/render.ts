@@ -22,8 +22,9 @@ export interface BoardMetrics {
 
 export function metricsFor(puzzle: Puzzle): BoardMetrics {
   const cell = BASE_CELL
-  const padTop = cell * 0.78
-  const padLeft = cell * 0.78
+  // 顶部 / 左侧留白加宽，行/列线索画在棋盘外面
+  const padTop = cell * 0.95
+  const padLeft = cell * 0.95
   const padRight = cell * 0.2
   const padBottom = cell * 0.2
   return {
@@ -118,12 +119,15 @@ export function renderBoard(
     `<svg class="board-svg" viewBox="0 0 ${m.svgWidth} ${m.svgHeight}" width="${m.svgWidth}" height="${m.svgHeight}" xmlns="http://www.w3.org/2000/svg">`,
   )
 
-  // 格子底
+  // 格子底：树 / 帐篷 / 草地 带浅绿地面背景，空地保持素底
   for (let cy = 0; cy < h; cy++) {
     for (let cx = 0; cx < w; cx++) {
+      const index = cellIndex(w, cx, cy)
       const { x, y } = cellXY(m, cx, cy)
+      const v = cellValue(state, index)
+      const ground = !!puzzle.trees[index] || v === CS.Tent || v === CS.Grass
       parts.push(
-        `<rect class="cell" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${m.cell}" height="${m.cell}" />`,
+        `<rect class="cell${ground ? ' ground' : ''}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${m.cell}" height="${m.cell}" />`,
       )
     }
   }
@@ -153,36 +157,31 @@ export function renderBoard(
         parts.push(treeMarkup(m, x, y))
         continue
       }
+      // 草地不再画灰点：浅绿地面背景本身就是「这里没帐篷」的标记
       const v = cellValue(state, index)
       if (v === CS.Tent) parts.push(tentMarkup(m, x, y, index))
-      else if (v === CS.Grass) {
-        const { x: ccx, y: ccy } = cellCenter(m, cx, cy)
-        parts.push(
-          `<circle class="grass" data-cell="${index}" cx="${ccx.toFixed(2)}" cy="${ccy.toFixed(2)}" r="${(m.cell * 0.075).toFixed(2)}" />`,
-        )
-      }
     }
   }
 
-  // 行线索（左侧）
+  // 行线索（棋盘左侧外面，与行居中）
   for (let cy = 0; cy < h; cy++) {
     const clue = puzzle.rowClues[cy]
     if (clue === null || clue === undefined) continue
-    const { x, y } = cellCenter(m, 0, cy)
+    const { y } = cellCenter(m, 0, cy)
     const cls = badRowSet.has(cy) ? 'clue bad' : 'clue'
     parts.push(
-      `<text class="${cls}" x="${(x - m.cell * 0.42).toFixed(2)}" y="${y.toFixed(2)}" style="font-size:${numSize}px">${clue}</text>`,
+      `<text class="${cls}" x="${(m.padLeft * 0.5).toFixed(2)}" y="${y.toFixed(2)}" style="font-size:${numSize}px">${clue}</text>`,
     )
   }
 
-  // 列线索（顶部）
+  // 列线索（棋盘顶部外面，与列居中）
   for (let cx = 0; cx < w; cx++) {
     const clue = puzzle.colClues[cx]
     if (clue === null || clue === undefined) continue
-    const { x, y } = cellCenter(m, cx, 0)
+    const { x } = cellCenter(m, cx, 0)
     const cls = badColSet.has(cx) ? 'clue bad' : 'clue'
     parts.push(
-      `<text class="${cls}" x="${x.toFixed(2)}" y="${(y - m.cell * 0.42).toFixed(2)}" style="font-size:${numSize}px">${clue}</text>`,
+      `<text class="${cls}" x="${x.toFixed(2)}" y="${(m.padTop * 0.5).toFixed(2)}" style="font-size:${numSize}px">${clue}</text>`,
     )
   }
 
