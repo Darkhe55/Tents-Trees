@@ -2,14 +2,17 @@ import './styles.css'
 import type { CellState, GameState, Move, Puzzle } from './types'
 import { CellState as CS } from './types'
 import {
+  actionValue,
   applyMove,
   cellValue,
   createEmptyState,
-  cycleCell,
   deserializeState,
   invertMove,
   isTree,
+  leftAction,
+  rightAction,
   serializeState,
+  type PaintAction,
 } from './state'
 import { getPuzzle, puzzles, randomPuzzle, treeCount } from './puzzles'
 import { cellCenter, clientToViewBox, hitTestCell, metricsFor, renderBoard, updateFlash, updateHover } from './render'
@@ -84,7 +87,7 @@ app.innerHTML = `
       <p>Tents · 每棵树配一个相邻帐篷 · 每个帐篷只挨一棵树 · 帐篷互不相邻 · 行列数字 = 帐篷数</p>
     </div>
     <div class="brand">
-      <p style="margin:0">左键循环：空 → 帐篷 → 草地 → 空 · 右键反向 · 按住拖拽连续涂</p>
+      <p style="margin:0">左键标记帐篷，右键标记空地</p>
     </div>
   </header>
 
@@ -128,8 +131,8 @@ app.innerHTML = `
       <div class="status" id="status">选择左侧题目开始。</div>
 
       <div class="legend">
-        <div><kbd>左键</kbd> 循环：空 → 帐篷 → 草地 → 空</div>
-        <div><kbd>右键</kbd> 反向循环 · <kbd>拖拽</kbd> 按住左键连续涂同一个状态</div>
+        <div><kbd>左键</kbd> 标记帐篷 · 再点取消</div>
+        <div><kbd>右键</kbd> 标记空地 · 再点取消 · <kbd>拖拽</kbd> 连续涂同一动作</div>
         <div><kbd>滚轮</kbd> 缩放 · <kbd>中键拖拽</kbd> 平移 · <kbd>0</kbd> 复位视图</div>
         <div><kbd>Z</kbd> 撤销 · <kbd>Shift+Z</kbd> 重做</div>
         <div><kbd>C</kbd> 检查 · <kbd>H</kbd> 提示 · <kbd>S</kbd> 显示解 · <kbd>Esc</kbd> 清空</div>
@@ -147,8 +150,6 @@ app.innerHTML = `
       <div id="board"></div>
     </main>
   </div>
-
-  <p class="footer-note">树固定不可改 · 树旁边的绿点是你自己标的「这里没帐篷」</p>
 `
 
 let session: Session | null = null
@@ -254,13 +255,6 @@ function setCells(targets: Array<{ index: number; value: CellState }>): number {
   const n = pushMoves(targets.map((t) => moveFor(t.index, t.value)))
   if (n) refresh()
   return n
-}
-
-function toggleCell(index: number, dir: 1 | -1 = 1): void {
-  if (!session) return
-  if (isTree(session.puzzle, index)) return
-  const next = cycleCell(cellValue(session.state, index), dir)
-  if (setCells([{ index, value: next }])) playCellFx(index, next !== CS.Unknown)
 }
 
 function undo(): void {
@@ -393,7 +387,8 @@ function updateHoverAt(clientX: number, clientY: number): void {
 
 interface Gesture {
   mode: 'paint' | 'pan'
-  paintDir: CellState
+  /** 落子动作：由起始格决定，整段拖拽保持不变 */
+  action: PaintAction
   lastCell: number
   startX: number
   startY: number
@@ -403,46 +398,69 @@ interface Gesture {
 
 let gesture: Gesture | null = null
 
+/** 给一格落子；树格跳过。「取消」动作不发音效 */
+function paintCell(cell: number, action: PaintAction, force = false): boolean {
+  if (!session || isTree(session.puzzle, cell)) return false
+  const value = actionValue(action)
+  if (!setCells([{ index: cell, value }])) return false
+  if (value === CS.Tent) playCellFx(cell, true, force)
+  else if (value === CS.Grass) playCellFx(cell, false, force)
+  return true
+}
+
 function boardPointerDown(e: PointerEvent): void {
   resumeAudio()
+  // 推理播放中玩家直接下手，就当打断
+  stopLogic()
   if (!session) return
   const svg = currentSvg()
   if (!svg) return
   const m = metricsFor(session.puzzle)
 
+  const panGesture = (): Gesture => ({
+    mode: 'pan',
+    action: 'clear',
+    lastCell: -1,
+    startX: e.clientX,
+    startY: e.clientY,
+    moved: false,
+    pointerId: e.pointerId,
+  })
+
+  // 中键：平移
   if (e.button === 1) {
     e.preventDefault()
-    gesture = { mode: 'pan', paintDir: CS.Unknown, lastCell: -1, startX: e.clientX, startY: e.clientY, moved: false, pointerId: e.pointerId }
+    gesture = panGesture()
     return
   }
 
-  if (e.button === 2) {
-    const vb = clientToViewBox(svg, e.clientX, e.clientY)
-    if (!vb) return
-    const cell = hitTestCell(m, session.puzzle, vb.x, vb.y)
-    if (cell !== null) toggleCell(cell, -1)
-    return
-  }
-
-  if (e.button !== 0) return
+  // 只认左键 / 右键
+  if (e.button !== 0 && e.button !== 2) return
 
   const vb = clientToViewBox(svg, e.clientX, e.clientY)
   if (!vb) return
   const cell = hitTestCell(m, session.puzzle, vb.x, vb.y)
 
+  // 按在棋盘外 → 平移
   if (cell === null) {
-    gesture = { mode: 'pan', paintDir: CS.Unknown, lastCell: -1, startX: e.clientX, startY: e.clientY, moved: false, pointerId: e.pointerId }
+    gesture = panGesture()
     return
   }
 
-  const paintDir = isTree(session.puzzle, cell)
-    ? CS.Unknown
-    : cycleCell(cellValue(session.state, cell), 1)
-  gesture = { mode: 'paint', paintDir, lastCell: cell, startX: e.clientX, startY: e.clientY, moved: false, pointerId: e.pointerId }
-  // 注意：paintDir 可能是 Unknown（循环到「清除」那一步），这时候也要能清空
-  if (setCells([{ index: cell, value: paintDir }])) {
-    playCellFx(cell, paintDir !== CS.Unknown, true)
+  // 动作由起始格的状态决定，整段拖拽沿用同一个动作
+  const action = e.button === 2
+    ? rightAction(cellValue(session.state, cell))
+    : leftAction(cellValue(session.state, cell))
+  gesture = {
+    mode: 'paint',
+    action,
+    lastCell: cell,
+    startX: e.clientX,
+    startY: e.clientY,
+    moved: false,
+    pointerId: e.pointerId,
   }
+  paintCell(cell, action, true)
   hoverCell = cell
 }
 
@@ -473,12 +491,8 @@ function boardPointerMove(e: PointerEvent): void {
   const cell = hitTestCell(m, session.puzzle, vb.x, vb.y)
   if (cell === null || cell === gesture.lastCell) return
   gesture.lastCell = cell
-  // 拖拽连续涂（含「清除」模式）：特效做节流，避免一屏音符
-  if (!isTree(session.puzzle, cell)) {
-    if (setCells([{ index: cell, value: gesture.paintDir }])) {
-      playCellFx(cell, gesture.paintDir !== CS.Unknown)
-    }
-  }
+  // 拖拽连续涂：沿用起始格定下的动作；特效内部有节流，避免一屏音符
+  paintCell(cell, gesture.action)
 }
 
 function boardPointerUp(e: PointerEvent): void {
@@ -574,24 +588,81 @@ function updateZoomLabel(): void {
   $('#zoom-label').textContent = `${Math.round(zoom * 100)}%`
 }
 
-/* ———————————————————— 逻辑解题（预留） ———————————————————— */
+/* ———————————————————— 逻辑解题 ———————————————————— */
 
 let flashCell: number | null = null
+/** 正在播放推理步骤 */
+let logicPlaying = false
+/** 播放中被用户操作打断 */
+let logicCancelled = false
+
+/** 每步之间的停留时间，够看清高亮 */
+const STEP_MS = 110
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function stopLogic(): void {
   flashCell = null
+  logicCancelled = true
   const svg = currentSvg()
   if (svg && session) updateFlash(svg, metricsFor(session.puzzle), null)
 }
 
-function runLogicSolver(): void {
+async function runLogicSolver(): Promise<void> {
   if (!session) return
-  const plan = planLogicSolve(session.puzzle)
+  if (logicPlaying) {
+    setStatus('逻辑解题：正在播放，先等这轮放完。', 'solving')
+    return
+  }
+
+  // 从当前盘面推，玩家已标的格子会作为前提
+  const plan = planLogicSolve(session.puzzle, session.state.cells)
+
   if (!plan.supported) {
     setStatus(`逻辑解题：${plan.reason}`, 'solving')
     return
   }
-  setStatus(`逻辑解题：推出 ${plan.steps.length} 步。`, 'solving')
+  if (plan.conflicts.length) {
+    setStatus(`逻辑解题：盘面对不上 —— ${plan.conflicts[0]}`, 'bad')
+    return
+  }
+  if (!plan.steps.length) {
+    setStatus(
+      plan.complete ? '逻辑解题：都推完了，没有新结论。' : '逻辑解题：三条规则推不动了，剩下的要假设推演。',
+      'solving',
+    )
+    return
+  }
+
+  logicPlaying = true
+  logicCancelled = false
+  setStatus(`逻辑解题：推出 ${plan.steps.length} 步，播放中…`, 'solving')
+
+  let cancelled = false
+  try {
+    for (const step of plan.steps) {
+      if (logicCancelled) {
+        cancelled = true
+        break
+      }
+      // 先记下高亮格，setCells 里的 refresh 会顺手画出来
+      flashCell = step.index
+      setCells([{ index: step.index, value: step.value }])
+      await sleep(STEP_MS)
+    }
+  } catch (err) {
+    console.error('逻辑解题播放异常：', err)
+    setStatus('逻辑解题：播放中断。', 'bad')
+  } finally {
+    logicPlaying = false
+    stopLogic()
+  }
+  if (cancelled) return
+
+  const result = validate(session.state, session.puzzle)
+  if (result.solved) setStatus('逻辑解题：推出完整解。', 'ok')
+  else if (plan.complete) setStatus(`逻辑解题：${plan.steps.length} 步全部落盘。`, 'ok')
+  else setStatus(`逻辑解题：落了 ${plan.steps.length} 步，剩下的要假设推演。`, 'solving')
 }
 
 /* ———————————————————— 自定义题板 ———————————————————— */
