@@ -4,7 +4,7 @@
  * 规则：
  * 1. 每棵树恰好配一个正交相邻（上下左右）的帐篷
  * 2. 每个帐篷恰好只挨一棵树
- * 3. 任意两个帐篷不能正交相邻
+ * 3. 任意两个帐篷不能相邻（正交或斜角都不行）
  * 4. 棋盘外数字 = 对应行/列的帐篷数
  */
 
@@ -56,7 +56,7 @@ export interface ValidationResult {
   badTrees: number[]
   /** 相邻树数不等于 1 的帐篷 */
   badTents: number[]
-  /** 与别的帐篷正交相邻的帐篷 */
+  /** 与别的帐篷相邻（含斜角）的帐篷 */
   adjacentTents: number[]
   /** 帐篷数不符的行号 */
   badRows: number[]

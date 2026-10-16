@@ -1,4 +1,4 @@
-import { cellIndex, cellValue, neighbors4, treePositions } from './state'
+import { cellIndex, cellValue, neighbors4, neighbors8, treePositions } from './state'
 import type { GameState, Puzzle, ValidationResult } from './types'
 import { CellState as CS } from './types'
 
@@ -52,10 +52,10 @@ export function validate(state: GameState, puzzle: Puzzle): ValidationResult {
     if (treesAround(puzzle, t.cx, t.cy) !== 1) badTents.push(t.index)
   }
 
-  // 规则 3：帐篷互不相邻
+  // 规则 3：帐篷互不相邻（正交或斜角都不行）
   const tentSet = new Set(tents.map((t) => t.index))
   for (const t of tents) {
-    for (const nb of neighbors4(w, h, t.cx, t.cy)) {
+    for (const nb of neighbors8(w, h, t.cx, t.cy)) {
       if (tentSet.has(cellIndex(w, nb.cx, nb.cy))) {
         adjacentTents.push(t.index)
         break

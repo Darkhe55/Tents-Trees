@@ -4,9 +4,9 @@
  * 剪枝：
  *  - 行/列：已放帐篷数 ≤ 线索，且已放 + 剩余空地 ≥ 线索
  *  - 树：相邻帐篷数 ≤ 1；若相邻空地已用完则必须恰好 1 个
- *  - 帐篷：放下的瞬间就要满足「恰好挨一棵树」且「不与别的帐篷相邻」
+ *  - 帐篷：放下的瞬间就要满足「恰好挨一棵树」且「不与别的帐篷相邻（含斜角）」
  */
-import { cellIndex, cellValue, createEmptyState, neighbors4, treePositions } from './state'
+import { cellIndex, cellValue, createEmptyState, neighbors4, neighbors8, treePositions } from './state'
 import type { CellState, GameState, Puzzle } from './types'
 import { CellState as CS } from './types'
 
@@ -89,9 +89,11 @@ class Searcher {
     // 恰好挨一棵树
     let trees = 0
     for (const nb of neighbors4(this.w, this.h, cx, cy)) {
-      const j = cellIndex(this.w, nb.cx, nb.cy)
-      if (this.puzzle.trees[j]) trees++
-      else if (this.cells[j] === CS.Tent) return false // 与别的帐篷相邻
+      if (this.puzzle.trees[cellIndex(this.w, nb.cx, nb.cy)]) trees++
+    }
+    // 不能挨上已放帐篷（正交或斜角都不行）
+    for (const nb of neighbors8(this.w, this.h, cx, cy)) {
+      if (this.cells[cellIndex(this.w, nb.cx, nb.cy)] === CS.Tent) return false
     }
     if (trees !== 1) return false
     // 行/列上限

@@ -21,6 +21,20 @@ export function neighbors4(w: number, h: number, cx: number, cy: number) {
   return out
 }
 
+/** 八邻（正交 + 斜角） */
+export function neighbors8(w: number, h: number, cx: number, cy: number) {
+  const out: Array<{ cx: number; cy: number }> = []
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue
+      const nx = cx + dx
+      const ny = cy + dy
+      if (nx >= 0 && ny >= 0 && nx < w && ny < h) out.push({ cx: nx, cy: ny })
+    }
+  }
+  return out
+}
+
 export function isTree(puzzle: Puzzle, index: number): boolean {
   return puzzle.trees[index] === true
 }
@@ -55,11 +69,25 @@ export function setCell(state: GameState, index: number, value: CellState): void
   state.cells[index] = value
 }
 
-/** 点击循环：未定 → 帐篷 → 草地 → 未定 */
-export function cycleCell(current: CellState, dir: 1 | -1 = 1): CellState {
-  if (current === CS.Unknown) return dir === 1 ? CS.Tent : CS.Grass
-  if (current === CS.Tent) return dir === 1 ? CS.Grass : CS.Unknown
-  return dir === 1 ? CS.Unknown : CS.Tent
+/* ———————————————————— 点击动作 ———————————————————— */
+
+/** 一次落子动作：搭帐篷 / 标草地 / 取消（恢复成空格） */
+export type PaintAction = 'tent' | 'grass' | 'clear'
+
+/** 左键：已是帐篷 → 取消；其余（空地 / 草地）→ 帐篷 */
+export function leftAction(current: CellState): PaintAction {
+  return current === CS.Tent ? 'clear' : 'tent'
+}
+
+/** 右键：已是草地 → 取消；其余（空地 / 帐篷）→ 草地 */
+export function rightAction(current: CellState): PaintAction {
+  return current === CS.Grass ? 'clear' : 'grass'
+}
+
+export function actionValue(action: PaintAction): CellState {
+  if (action === 'tent') return CS.Tent
+  if (action === 'grass') return CS.Grass
+  return CS.Unknown
 }
 
 export function applyMove(state: GameState, move: Move): void {

@@ -9,7 +9,7 @@
  *   4. 用 countSolutions 校验唯一解，不唯一就重来
  */
 import { countSolutions } from '../src/solver.ts'
-import { cellIndex, neighbors4 } from '../src/state.ts'
+import { cellIndex, neighbors4, neighbors8 } from '../src/state.ts'
 import type { Puzzle } from '../src/types'
 import { writeFileSync } from 'node:fs'
 
@@ -39,7 +39,7 @@ function shuffled<T>(arr: T[], rng: () => number): T[] {
  *
  * 维护两个可用性数组，保证合法性是构造出来的：
  *   canTree[i] = i 不挨着任何已放帐篷（否则新树会有两个相邻帐篷）
- *   canTent[i] = i 不挨着已放帐篷（帐篷互不相邻）、不挨着已放树（否则挨两棵树）、自己也不是树
+ *   canTent[i] = i 不挨着已放帐篷（含斜角）、不挨着已放树（否则挨两棵树）、自己也不是树
  */
 function randomLayout(w: number, h: number, pairs: number, rng: () => number) {
   const total = w * h
@@ -62,9 +62,13 @@ function randomLayout(w: number, h: number, pairs: number, rng: () => number) {
     }
     const ccx = tentIdx % w
     const ccy = Math.floor(tentIdx / w)
+    // 帐篷互不相邻，斜角也不行 → 八邻都不能再放帐篷
+    for (const nb of neighbors8(w, h, ccx, ccy)) {
+      canTent[at(nb.cx, nb.cy)] = false
+    }
+    // 挨着帐篷（正交）的格子不能再当树，否则这个帐篷会挨到两棵树
     for (const nb of neighbors4(w, h, ccx, ccy)) {
-      canTent[at(nb.cx, nb.cy)] = false // 帐篷互不相邻
-      canTree[at(nb.cx, nb.cy)] = false // 挨着帐篷的格子不能再当树
+      canTree[at(nb.cx, nb.cy)] = false
     }
   }
 
