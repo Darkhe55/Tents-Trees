@@ -122,8 +122,8 @@ app.innerHTML = `
       <div class="custom-editor" id="custom-editor" hidden>
         <h2>自定义题板</h2>
         <div class="custom-row">
-          <label>宽 <input id="custom-w" type="number" min="3" max="14" value="6" /></label>
-          <label>高 <input id="custom-h" type="number" min="3" max="14" value="6" /></label>
+          <label>宽 <input id="custom-w" type="number" min="3" max="40" value="6" /></label>
+          <label>高 <input id="custom-h" type="number" min="3" max="40" value="6" /></label>
           <button class="btn" id="custom-regen" type="button">生成网格</button>
         </div>
         <div class="custom-hint">点击格子种树（再点取消），然后「载入题板」；行列线索留空自行推理。</div>
@@ -784,8 +784,8 @@ function renderCustomGrid(): void {
 }
 
 function readCustomSize(): void {
-  customW = Math.min(Math.max(Number($input('#custom-w').value) || 6, 3), 14)
-  customH = Math.min(Math.max(Number($input('#custom-h').value) || 6, 3), 14)
+  customW = Math.min(Math.max(Number($input('#custom-w').value) || 6, 3), 40)
+  customH = Math.min(Math.max(Number($input('#custom-h').value) || 6, 3), 40)
 }
 
 /** 网格尺寸变了就重建（保留仍在范围内的树位） */
