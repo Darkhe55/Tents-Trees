@@ -76,3 +76,21 @@ npm run build     # tsc --noEmit + vite build
 npm run gen       # 重新生成题库
 npm run check     # 审计题库
 ```
+
+## 图片导入
+
+`npm run import-image -- <图片路径>` 可以自动识别帐篷（Tents）题图：黑线投影定位网格，按格子背景色（浅绿）识别树，盘外数字用多字体模板匹配 OCR。
+
+```bash
+npm run import-image -- 题图.png --dry                   # 只识别与预览
+npm run import-image -- 题图.png --name "我的帐篷" --append     # 追加到题库
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--size N` / `--width W --height H` | 覆盖棋盘尺寸 |
+| `--rows "a,b,…"` / `--cols "a,b,…"` | OCR 不确定时手动覆盖行/列线索 |
+| `--name` / `--id` | 题库名字 / id |
+| `--append` / `--verify` / `--dry` | 写入题库 / 唯一解检查 / 只识别 |
+
+注意：当前版本对每月 30×30 大题可靠识别了树位（180 棵）但线索数字 OCR 仍不完整，建议先用 --dry 预览，必要时用 --rows/--cols 手工补线索再 --append。

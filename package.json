@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "gen": "esbuild scripts/gen-puzzles.mts --bundle --format=esm --platform=node --outfile=scripts/gen-puzzles.mjs && node scripts/gen-puzzles.mjs",
+    "import-image": "node scripts/import-image.mjs",
     "check": "esbuild scripts/check.mts --bundle --format=esm --platform=node --outfile=scripts/check.mjs && node scripts/check.mjs"
   },
   "devDependencies": {

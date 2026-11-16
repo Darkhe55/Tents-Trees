@@ -1,5 +1,6 @@
 import type { Puzzle } from './types'
 import { RAW_PUZZLES, type RawPuzzle } from './puzzles-data'
+import { IMPORTED_PUZZLES } from './imported-puzzles'
 
 function parseBoolMap(s: string): boolean[] {
   return [...s].map((ch) => ch === '#' || ch === 'o')
@@ -25,7 +26,7 @@ function toPuzzle(r: RawPuzzle): Puzzle {
 }
 
 /** 静态题库（import 即用，无运行时生成） */
-export const puzzles: Puzzle[] = RAW_PUZZLES.map(toPuzzle)
+export const puzzles: Puzzle[] = [...RAW_PUZZLES, ...IMPORTED_PUZZLES].map(toPuzzle)
 
 export function getPuzzle(id: string): Puzzle | undefined {
   return puzzles.find((p) => p.id === id)
