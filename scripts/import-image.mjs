@@ -4,18 +4,24 @@
  * 用法：
  *   node scripts/import-image.mjs <图片路径> [--size N | --width W --height H]
  *                                  [--name 名称] [--id ID] [--rows "a,b,…"] [--cols "a,b,…"]
- *                                  [--append] [--verify] [--dry]
+ *                                  [--map <JSON文件|内联JSON>] [--append] [--verify] [--dry] [--debug]
  *
  * 识图原理：
  *   1. Playwright + Edge 打开图片到 canvas，取像素；
  *   2. 黑线投影定位网格线，拟合出题板尺寸与格距；
  *   3. 每格采样背景色：浅绿(153,255,153)/树冠绿 = 树格，其余 = 空地；
- *   4. 盘外粗体数字用「多字体模板匹配」OCR：左侧=行帐篷数、上方=列帐篷数；
+ *   4. 盘外线索：在棋盘上/左留白里取暗色连通域 → 按最近的行/列槽位归组 →
+ *      组内按水平间隙切成单个数字 → 多字体模板匹配 OCR；左侧=行帐篷数、上方=列帐篷数；
  *   5. 生成题库格式 trees/rows/cols（solution 留空，需要时可用 --verify 校验）；
  *   6. --append 写入 src/imported-puzzles.ts（不会被 npm run gen 覆盖）；
  *   7. --verify 用项目求解器检查唯一解（30×30 可能超时，只警告）。
  *
- * 识别不确定时用 --rows / --cols 覆盖线索，或 --width/--height 覆盖棋盘尺寸。
+ * 数字区域必须用整数像素边界扫描：早期版本把 xs[0] 这类浮点坐标直接当
+ * 连通域边界，循环下标变成小数，像素采样得到 NaN，整块区域会被静默读成 0 个数字。
+ *
+ * 识别不确定时：
+ *   - --rows / --cols 覆盖线索：数字=帐篷数，`?`=保留 OCR 结果，空/x = 该行（列）无数字；
+ *   - --map 用 JSON 整体修正（width/height/trees/rows/cols，未给的字段保留识别结果）。
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
@@ -28,20 +34,42 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const EDGE_PATH =
   process.env.EDGE_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
 
-function arg(name, fallback = null) {
-  const i = process.argv.indexOf(name)
-  if (i < 0) return fallback
-  return process.argv[i + 1] ?? fallback
-}
-function has(name) {
-  return process.argv.includes(name)
-}
+/* ───────────────────────── 参数解析 ───────────────────────── */
 
-const imageArg = process.argv.slice(2).find((a) => !a.startsWith('--'))
+const VALUE_FLAGS = new Set([
+  '--size',
+  '--width',
+  '--height',
+  '--name',
+  '--id',
+  '--series',
+  '--rows',
+  '--cols',
+  '--map',
+])
+const flags = {}
+const positional = []
+for (let i = 2; i < process.argv.length; i++) {
+  const a = process.argv[i]
+  if (!a.startsWith('--')) {
+    positional.push(a)
+    continue
+  }
+  const eq = a.indexOf('=')
+  if (eq > 0) {
+    flags[a.slice(0, eq)] = a.slice(eq + 1)
+  } else if (VALUE_FLAGS.has(a)) {
+    flags[a] = process.argv[++i]
+  } else {
+    flags[a] = true
+  }
+}
+const imageArg = positional[0]
+const USAGE =
+  '用法：node scripts/import-image.mjs <图片路径> [--size N | --width W --height H] [--name 名称] [--id ID] ' +
+  '[--rows "…"] [--cols "…"] [--map <JSON>] [--append] [--verify] [--dry] [--debug]'
 if (!imageArg) {
-  console.error(
-    '用法：node scripts/import-image.mjs <图片路径> [--size N | --width W --height H] [--name 名称] [--id ID] [--rows "…"] [--cols "…"] [--append] [--verify] [--dry]',
-  )
+  console.error(USAGE)
   process.exit(1)
 }
 const imagePath = path.resolve(process.cwd(), imageArg)
@@ -50,17 +78,106 @@ if (!existsSync(imagePath)) {
   process.exit(1)
 }
 
-const sizeOpt = Number(arg('--size', '0')) || 0
-const widthOpt = Number(arg('--width', '0')) || 0
-const heightOpt = Number(arg('--height', '0')) || 0
-const rowsOverride = arg('--rows', '')
-const colsOverride = arg('--cols', '')
-const name = arg('--name', path.basename(imagePath, path.extname(imagePath)))
-const id = arg('--id', `tents-import-${Date.now().toString(36)}`)
-const series = arg('--series', '导入')
-const append = has('--append')
-const verify = has('--verify')
-const dry = has('--dry')
+const sizeOpt = Number(flags['--size'] ?? 0) || 0
+const widthOpt = Number(flags['--width'] ?? 0) || 0
+const heightOpt = Number(flags['--height'] ?? 0) || 0
+const strFlag = (key) => (typeof flags[key] === 'string' ? flags[key] : '')
+const rowsOverride = strFlag('--rows')
+const colsOverride = strFlag('--cols')
+const mapArg = strFlag('--map')
+const name = strFlag('--name') || path.basename(imagePath, path.extname(imagePath))
+const id = strFlag('--id') || `tents-import-${Date.now().toString(36)}`
+const series = strFlag('--series') || '导入'
+const append = !!flags['--append']
+const verify = !!flags['--verify']
+const dry = !!flags['--dry']
+const debug = !!flags['--debug']
+
+/** 人工修正用的「保留 OCR 值」占位符 */
+const KEEP = Symbol('keep')
+
+/** 解析 "7,6,?,x,10" → [7, 6, KEEP, null, 10] */
+function parseClueSpec(text) {
+  return text.split(',').map((part) => {
+    const s = part.trim()
+    const lower = s.toLowerCase()
+    if (s === '?' || s === '=' || lower === 'keep') return KEEP
+    if (s === '' || s === '-' || lower === 'x' || lower === 'null') return null
+    const n = Number(s)
+    if (!Number.isFinite(n) || n < 0) {
+      console.error(`[import] 无法解析线索「${s}」：应为数字 / ? 保留 OCR / 空·x 表示无数字`)
+      process.exit(1)
+    }
+    return n
+  })
+}
+
+/** 把 `--map` 里可能的线索写法统一成 spec 数组（数字 / null / KEEP） */
+function specFromMapValue(value) {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'string') return parseClueSpec(value)
+  if (!Array.isArray(value)) {
+    console.error('[import] --map 的 rows/cols 应为数组或逗号分隔字符串')
+    process.exit(1)
+  }
+  return value.map((v) => {
+    if (v === null || v === undefined || v === '' || v === 'x' || v === '-') return null
+    if (v === '?' || v === 'keep') return KEEP
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0) {
+      console.error(`[import] --map 线索值无法解析：${JSON.stringify(v)}`)
+      process.exit(1)
+    }
+    return n
+  })
+}
+
+/** 把 --map 里的树位统一成 '#' / '.' 字符串（row-major） */
+function treesFromMapValue(value, w, h) {
+  if (typeof value === 'string') {
+    const flat = [...value]
+    if (flat.length === w * h) return value
+    const rows = value
+      .split(/[\n|;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (rows.length === h && rows.every((r) => [...r].length === w)) return rows.join('')
+    console.error(`[import] --map 的 trees 长度应为 ${w * h}（或 ${h} 行 × ${w} 列）`)
+    process.exit(1)
+  }
+  if (Array.isArray(value)) {
+    if (value.length === h && value.every((r) => typeof r === 'string')) {
+      const rows = value.map((r) => [...r])
+      if (rows.every((r) => r.length === w)) {
+        return rows.map((r) => r.map((ch) => (ch === '#' || ch === 'o' || ch === '1' ? '#' : '.')).join('')).join('')
+      }
+    }
+    const flat = value
+      .flat()
+      .map((v) => (v === true || v === 1 || v === '#' || v === 'o' || v === '*' ? '#' : '.'))
+    if (flat.length === w * h) return flat.join('')
+    console.error(`[import] --map 的 trees 数组长度应为 ${w * h}`)
+    process.exit(1)
+  }
+  console.error('[import] --map 的 trees 应为字符串或数组')
+  process.exit(1)
+}
+
+let map = null
+if (mapArg) {
+  let raw = mapArg
+  if (existsSync(mapArg)) raw = readFileSync(mapArg, 'utf8')
+  try {
+    map = JSON.parse(raw)
+  } catch (err) {
+    console.error(`[import] --map 不是合法 JSON（${mapArg}）：${err.message}`)
+    process.exit(1)
+  }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    console.error('[import] --map 应为 JSON 对象：{ width, height, trees, rows, cols }')
+    process.exit(1)
+  }
+}
 
 /* ───────────────────────── 识图（浏览器内） ───────────────────────── */
 
@@ -168,14 +285,21 @@ const analyzed = await page.evaluate(async (url) => {
       }
     }
 
-  // ── 3) 线索数字 OCR（与温度计同一套多字体模板匹配） ──
+  // ── 3) 盘外线索数字 OCR ──
+  const INK = 100 // 黑字阈值：浅灰的行列编号（~153）会落在阈值外，不会被当成线索
+
+  /** 暗色 4 连通域。边界必须取整——传小数会让像素下标变成小数、采样得到 NaN。 */
   const comps = (bx0, by0, bx1, by1) => {
+    const x0 = Math.max(0, Math.floor(bx0))
+    const y0 = Math.max(0, Math.floor(by0))
+    const x1 = Math.min(W, Math.ceil(bx1))
+    const y1 = Math.min(H, Math.ceil(by1))
     const seen = new Uint8Array(W * H)
     const out = []
-    for (let y = Math.max(0, by0); y < Math.min(H, by1); y++)
-      for (let x = Math.max(0, bx0); x < Math.min(W, bx1); x++) {
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
         const k = y * W + x
-        if (seen[k] || lum(x, y) >= 100) continue
+        if (seen[k] || lum(x, y) >= INK) continue
         let n = 0
         let sx = 0
         let sy = 0
@@ -194,184 +318,345 @@ const analyzed = await page.evaluate(async (url) => {
           if (cx > maxX) maxX = cx
           if (cy < minY) minY = cy
           if (cy > maxY) maxY = cy
-          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          for (const [dx, dy] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+          ]) {
             const nx = cx + dx
             const ny = cy + dy
-            if (nx < bx0 || ny < by0 || nx >= bx1 || ny >= by1) continue
+            if (nx < x0 || ny < y0 || nx >= x1 || ny >= y1) continue
             const nk = ny * W + nx
-            if (seen[nk] || lum(nx, ny) >= 100) continue
+            if (seen[nk] || lum(nx, ny) >= INK) continue
             seen[nk] = 1
             st.push([nx, ny])
           }
         }
-        out.push({ n, cx: sx / n, cy: sy / n, w: maxX - minX + 1, h: maxY - minY + 1, minX, minY, maxX, maxY })
+        out.push({
+          n,
+          cx: sx / n,
+          cy: sy / n,
+          w: maxX - minX + 1,
+          h: maxY - minY + 1,
+          minX,
+          minY,
+          maxX,
+          maxY,
+        })
       }
     return out
   }
-  const glyphFilter = (arr) =>
-    arr.filter((c) => c.n >= 15 && c.h >= cell * 0.25 && c.h <= cell * 0.95 && c.w <= cell * 1.1)
-  const rowGlyphs = glyphFilter(comps(Math.round(xs[0] - cell * 1.35), ys[0], Math.round(xs[0] - 2), ys[nRows]))
-  const colGlyphs = glyphFilter(comps(xs[0], Math.round(ys[0] - cell * 1.35), xs[nCols], Math.round(ys[0] - 2)))
-  const groupLines = (arr, key, tol) => {
-    const sorted = arr.slice().sort((a, b) => a[key] - b[key])
-    const lines = []
-    for (const c of sorted) {
-      const last = lines[lines.length - 1]
-      if (last && Math.abs(c[key] - last.avg) <= tol) {
-        last.items.push(c)
-        last.avg = last.items.reduce((s, m) => s + m[key], 0) / last.items.length
-      } else lines.push({ avg: c[key], items: [c] })
-    }
-    for (const l of lines) l.items.sort((a, b) => a.cx - b.cx)
-    return lines
-  }
-  const dbg = { xs0: xs[0], xsN: xs[nCols], ys0: ys[0], ysN: ys[nRows], rowGlyphs: rowGlyphs.length, colGlyphs: colGlyphs.length, rowLines: rowLines0(rowGlyphs).length }
-  function rowLines0(g) { return g }
-  console.log('[import][debug] ' + JSON.stringify(dbg))
-  const rowLines = groupLines(rowGlyphs, 'cy', cell * 0.42)
-  const colLines = groupLines(colGlyphs, 'cx', cell * 0.42)
 
-  const N = 20
-  const glyphBitmap = (c) => {
-    const bw = c.maxX - c.minX + 1
-    const bh = c.maxY - c.minY + 1
+  /** 数字是单字块；书本/边缘的细线、网格线残片按尺寸过滤掉 */
+  const isGlyph = (c) =>
+    c.n >= 12 &&
+    c.h >= cell * 0.16 &&
+    c.h <= cell * 1.0 &&
+    c.w >= cell * 0.05 &&
+    c.w <= cell * 0.75
+
+  /** 两个字挤在一起时按竖直投影的空白列切开 */
+  const splitWideGlyph = (c) => {
+    if (c.w <= cell * 0.62) return [c]
+    const runs = []
+    let cur = null
+    for (let x = c.minX; x <= c.maxX; x++) {
+      let cnt = 0
+      for (let y = c.minY; y <= c.maxY; y++) if (lum(x, y) < INK) cnt++
+      if (cnt > 0) {
+        if (cur) cur.maxX = x
+        else cur = { minX: x, maxX: x }
+      } else if (cur) {
+        runs.push(cur)
+        cur = null
+      }
+    }
+    if (cur) runs.push(cur)
+    if (runs.length < 2 || runs.length > 4) return [c]
+    const out = []
+    for (const r of runs) {
+      let minY = Infinity
+      let maxY = -Infinity
+      let n = 0
+      for (let y = c.minY; y <= c.maxY; y++)
+        for (let x = r.minX; x <= r.maxX; x++)
+          if (lum(x, y) < INK) {
+            n++
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+          }
+      if (n < 12 || maxY - minY + 1 < cell * 0.16) return [c]
+      out.push({
+        n,
+        cx: (r.minX + r.maxX) / 2,
+        cy: (minY + maxY) / 2,
+        w: r.maxX - r.minX + 1,
+        h: maxY - minY + 1,
+        minX: r.minX,
+        minY,
+        maxX: r.maxX,
+        maxY,
+      })
+    }
+    return out
+  }
+
+  /** 把 bbox 内的字形归一化成 N×N 灰度位图（每个格子取 3×3 子采样，与模板同尺度） */
+  const N = 24
+  const bitmapOfBox = (minX, minY, maxX, maxY, boxW, boxH, lumAt) => {
+    const bw = maxX - minX + 1
+    const bh = maxY - minY + 1
     const bm = new Float32Array(N * N)
     for (let j = 0; j < N; j++)
       for (let i = 0; i < N; i++) {
         let sum = 0
         let cnt = 0
-        for (let oy = -1; oy <= 1; oy++)
-          for (let ox = -1; ox <= 1; ox++) {
-            const pxx = Math.round(c.minX + ((i + 0.5) * bw) / N + ox * 0.7)
-            const pyy = Math.round(c.minY + ((j + 0.5) * bh) / N + oy * 0.7)
-            if (pxx < 0 || pyy < 0 || pxx >= W || pyy >= H) continue
-            sum += Math.max(0, Math.min(1, (255 - lum(pxx, pyy)) / 255))
+        for (let sy = -1; sy <= 1; sy++)
+          for (let sx = -1; sx <= 1; sx++) {
+            const x = Math.round(minX + (i + 0.5 + sx * 0.28) * (bw / N))
+            const y = Math.round(minY + (j + 0.5 + sy * 0.28) * (bh / N))
+            if (x < 0 || y < 0 || x >= boxW || y >= boxH) continue
+            sum += Math.max(0, Math.min(1, (255 - lumAt(x, y)) / 255))
             cnt++
           }
         bm[j * N + i] = cnt ? sum / cnt : 0
       }
     return bm
   }
+  const bitmapOfGlyph = (c) => bitmapOfBox(c.minX, c.minY, c.maxX, c.maxY, W, H, lum)
+
+  // 3.1 多字体数字模板：每个数字单独渲染，取暗像素 bbox 归一化
   const fonts = [
     'Arial',
     'Arial Black',
+    'Arial Narrow',
+    'Segoe UI',
+    'Segoe UI Semibold',
+    'Segoe UI Black',
     'Helvetica',
     'Verdana',
     'Tahoma',
     'Trebuchet MS',
-    'Segoe UI',
     'Calibri',
     'Franklin Gothic Medium',
+    'Impact',
+    'Bahnschrift',
     'Liberation Sans',
     'DejaVu Sans',
     'Noto Sans',
   ]
+  const weights = ['bold', 'normal', '600', '900']
+  const TCW = 200
+  const TCH = 160
   const tcv = document.createElement('canvas')
-  tcv.width = 520
-  tcv.height = 120
+  tcv.width = TCW
+  tcv.height = TCH
   const tg = tcv.getContext('2d', { willReadFrequently: true })
-  const renderTemplates = (font, weight) => {
-    tg.fillStyle = '#fff'
-    tg.fillRect(0, 0, 520, 120)
-    tg.fillStyle = '#000'
-    tg.font = `${weight} 70px "${font}"`
-    tg.textBaseline = 'top'
-    tg.fillText('0123456789', 4, 6)
-    const td = tg.getImageData(0, 0, 520, 120).data
-    const tl = (x, y) => {
-      const i = (y * 520 + x) * 4
-      return 0.299 * td[i] + 0.587 * td[i + 1] + 0.114 * td[i + 2]
-    }
-    const seenT = new Uint8Array(520 * 120)
-    const out = []
-    for (let y = 0; y < 120; y++)
-      for (let x = 0; x < 520; x++) {
-        const k = y * 520 + x
-        if (seenT[k] || tl(x, y) > 128) continue
-        let n = 0
-        let minX = x
-        let maxX = x
-        let minY = y
-        let maxY = y
-        const st = [[x, y]]
-        seenT[k] = 1
-        while (st.length) {
-          const [cx, cy] = st.pop()
-          n++
-          if (cx < minX) minX = cx
-          if (cx > maxX) maxX = cx
-          if (cy < minY) minY = cy
-          if (cy > maxY) maxY = cy
-          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const nx = cx + dx
-            const ny = cy + dy
-            if (nx < 0 || ny < 0 || nx >= 520 || ny >= 120) continue
-            const nk = ny * 520 + nx
-            if (seenT[nk] || tl(nx, ny) > 128) continue
-            seenT[nk] = 1
-            st.push([nx, ny])
-          }
+  const templates = []
+  for (const font of fonts) {
+    for (const weight of weights) {
+      const family = `${font} ${weight}`
+      const per = []
+      let ok = true
+      for (let d = 0; d < 10; d++) {
+        tg.fillStyle = '#fff'
+        tg.fillRect(0, 0, TCW, TCH)
+        tg.fillStyle = '#000'
+        tg.font = `${weight} 96px "${font}"`
+        tg.textBaseline = 'top'
+        tg.fillText(String(d), 20, 20)
+        const td = tg.getImageData(0, 0, TCW, TCH).data
+        const tl = (x, y) => {
+          const i = (y * TCW + x) * 4
+          return 0.299 * td[i] + 0.587 * td[i + 1] + 0.114 * td[i + 2]
         }
-        out.push({ n, minX, maxX, minY, maxY })
-      }
-    const glyphs = out.filter((c) => c.n > 30).sort((a, b) => a.minX - b.minX).slice(0, 10)
-    if (glyphs.length !== 10) return null
-    return glyphs.map((c) => {
-      const bw = c.maxX - c.minX + 1
-      const bh = c.maxY - c.minY + 1
-      const bm = new Float32Array(N * N)
-      for (let j = 0; j < N; j++)
-        for (let i = 0; i < N; i++) {
-          let sum = 0
-          let cnt = 0
-          for (let oy = -1; oy <= 1; oy++)
-            for (let ox = -1; ox <= 1; ox++) {
-              const pxx = Math.round(c.minX + ((i + 0.5) * bw) / N + ox * 0.7)
-              const pyy = Math.round(c.minY + ((j + 0.5) * bh) / N + oy * 0.7)
-              if (pxx < 0 || pyy < 0 || pxx >= 520 || pyy >= 120) continue
-              sum += Math.max(0, Math.min(1, (255 - tl(pxx, pyy)) / 255))
-              cnt++
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -Infinity
+        let maxY = -Infinity
+        for (let y = 0; y < TCH; y++)
+          for (let x = 0; x < TCW; x++)
+            if (tl(x, y) < 128) {
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
             }
-          bm[j * N + i] = cnt ? sum / cnt : 0
+        if (!Number.isFinite(minX) || maxX - minX + 1 < 6) {
+          ok = false
+          break
         }
-      return bm
-    })
+        per.push({
+          digit: d,
+          family,
+          bm: bitmapOfBox(minX, minY, maxX, maxY, TCW, TCH, tl),
+        })
+      }
+      if (ok) templates.push(...per)
+    }
   }
+  if (templates.length < 10) return { error: '数字 OCR 模板渲染失败' }
+
   const bitmapDiff = (a, b) => {
     let s = 0
     for (let i = 0; i < N * N; i++) s += Math.abs(a[i] - b[i])
     return s / (N * N)
   }
-  const allBitmaps = [...rowGlyphs, ...colGlyphs].map(glyphBitmap)
-  let bestFont = null
-  for (const font of fonts)
-    for (const weight of ['bold', 'normal']) {
-      const templates = renderTemplates(font, weight)
-      if (!templates) continue
-      let total = 0
-      for (const bm of allBitmaps) {
-        let m = Infinity
-        for (const t of templates) m = Math.min(m, bitmapDiff(bm, t))
-        total += m
-      }
-      const avg = total / Math.max(1, allBitmaps.length)
-      if (!bestFont || avg < bestFont.avg) bestFont = { name: `${font} ${weight}`, templates, avg }
+
+  /** 单字识别：跨全部字体/字重取最小 L1 距离；margin = 次优「不同数字」的距离差 */
+  const readDigit = (c) => {
+    const bm = bitmapOfGlyph(c)
+    let best = null
+    const famMin = new Map()
+    for (const t of templates) {
+      const diff = bitmapDiff(bm, t.bm)
+      if (!best || diff < best.diff) best = { digit: t.digit, diff, family: t.family }
+      const prev = famMin.get(t.family)
+      if (prev === undefined || diff < prev) famMin.set(t.family, diff)
     }
-  if (!bestFont) return { error: '数字 OCR 模板渲染失败' }
-  const digitOf = (bm) => {
-    let best = -1
-    let bestDiff = Infinity
-    bestFont.templates.forEach((t, i) => {
-      const diff = bitmapDiff(bm, t)
-      if (diff < bestDiff) {
-        bestDiff = diff
-        best = i
+    let secondDiff = Infinity
+    for (const t of templates) {
+      if (t.digit === best.digit) continue
+      const diff = bitmapDiff(bm, t.bm)
+      if (diff < secondDiff) secondDiff = diff
+    }
+    return {
+      digit: best.digit,
+      diff: best.diff,
+      family: best.family,
+      margin: Number.isFinite(secondDiff) ? secondDiff - best.diff : Infinity,
+      famMin,
+    }
+  }
+
+  /** 槽位归组：按数字中心到行/列中心的距离归到最近一格（0.55 格内） */
+  const groupByNearest = (list, centers, half, posOf) => {
+    const groups = Array.from({ length: centers.length }, () => [])
+    for (const item of list) {
+      const pos = posOf(item)
+      let bi = -1
+      let bd = Infinity
+      for (let i = 0; i < centers.length; i++) {
+        const d = Math.abs(pos - centers[i])
+        if (d < bd) {
+          bd = d
+          bi = i
+        }
       }
-    })
+      if (bi >= 0 && bd <= half) groups[bi].push(item)
+    }
+    return groups
+  }
+
+  /**
+   * 组内可能混入灰色行列编号（若它也是深色）：按水平间隙切簇，
+   * 取最靠近棋盘的那一簇（左：最右簇；上：最下簇）作为线索数字。
+   */
+  const pickClueCluster = (items, side) => {
+    if (!items.length) return []
+    const sorted = items.slice().sort((a, b) => a.cx - b.cx)
+    const clusters = []
+    for (const item of sorted) {
+      const last = clusters[clusters.length - 1]
+      const gap = last ? item.minX - last[last.length - 1].maxX : 0
+      if (last && gap <= cellX * 0.34) last.push(item)
+      else clusters.push([item])
+    }
+    if (clusters.length <= 1) return clusters[0] ?? []
+    let best = clusters[0]
+    let bestD = Infinity
+    for (const cl of clusters) {
+      const near = side === 'left' ? Math.max(...cl.map((c) => c.maxX)) : Math.max(...cl.map((c) => c.maxY))
+      const d = side === 'left' ? xs[0] - near : ys[0] - near
+      if (d < bestD) {
+        bestD = d
+        best = cl
+      }
+    }
     return best
   }
-  const readLines = (lines) =>
-    lines.map((line) => line.items.map((c) => digitOf(glyphBitmap(c))).reduce((a, d) => a * 10 + d, 0))
+
+  // 3.2 取盘外暗色字块：留白带按格距缩放，且离网格线预留 0.12 格避开描边抗锯齿
+  const rowRegion = [
+    xs[0] - cell * 1.7,
+    ys[0] + 2,
+    xs[0] - cell * 0.12,
+    ys[nRows] - 2,
+  ]
+  const colRegion = [
+    xs[0] + cell * 0.12,
+    ys[0] - cell * 1.7,
+    xs[nCols] - cell * 0.12,
+    ys[0] - cell * 0.12,
+  ]
+  const prep = (raw) => raw.flatMap((c) => (isGlyph(c) ? splitWideGlyph(c) : []))
+  const rowGlyphs = prep(comps(...rowRegion))
+  const colGlyphs = prep(comps(...colRegion))
+
+  const rowCenters = Array.from({ length: nRows }, (_, i) => ys[0] + (i + 0.5) * cellY)
+  const colCenters = Array.from({ length: nCols }, (_, j) => xs[0] + (j + 0.5) * cellX)
+  const rowGroups = groupByNearest(rowGlyphs, rowCenters, cellY * 0.55, (c) => c.cy)
+  const colGroups = groupByNearest(colGlyphs, colCenters, cellX * 0.55, (c) => c.cx)
+
+  const fontScores = new Map()
+  const readClues = (groups, side) => {
+    const values = []
+    const details = []
+    let digitCount = 0
+    for (const items of groups) {
+      const cluster = pickClueCluster(items, side)
+      if (!cluster.length) {
+        values.push(null)
+        details.push(null)
+        continue
+      }
+      const ordered = cluster.slice().sort((a, b) => a.cx - b.cx)
+      let value = 0
+      let worst = null
+      const digits = []
+      for (const c of ordered) {
+        const r = readDigit(c)
+        digits.push(r.digit)
+        value = value * 10 + r.digit
+        digitCount++
+        if (!worst || r.diff > worst.diff) worst = r
+        for (const [fam, d] of r.famMin) {
+          const prev = fontScores.get(fam) ?? { sum: 0, n: 0 }
+          prev.sum += d
+          prev.n++
+          fontScores.set(fam, prev)
+        }
+      }
+      values.push(value)
+      details.push({
+        value,
+        digits,
+        diff: worst.diff,
+        margin: worst.margin,
+        family: worst.family,
+      })
+    }
+    return { values, details, digitCount }
+  }
+  const rowRead = readClues(rowGroups, 'left')
+  const colRead = readClues(colGroups, 'top')
+
+  let bestFamily = null
+  for (const [fam, s] of fontScores) {
+    const avg = s.sum / s.n
+    if (!bestFamily || avg < bestFamily.avg) bestFamily = { family: fam, avg }
+  }
+  const lowConf = (read) =>
+    read.details
+      .map((d, i) => (d ? { index: i + 1, ...d } : null))
+      .filter((d) => d && (d.margin < 0.02 || d.diff > 0.18))
+      .map((d) => ({ index: d.index, value: d.value, diff: +d.diff.toFixed(4), margin: +d.margin.toFixed(4) }))
+  const overallWorst = Math.max(
+    0,
+    ...[...rowRead.details, ...colRead.details].filter(Boolean).map((d) => d.diff),
+  )
+
   return {
     W,
     H,
@@ -379,10 +664,18 @@ const analyzed = await page.evaluate(async (url) => {
     nRows,
     cell,
     trees,
-    rowClues: readLines(rowLines),
-    colClues: readLines(colLines),
-    fontGuess: bestFont.name,
-    fontAvg: bestFont.avg,
+    rowClues: rowRead.values,
+    colClues: colRead.values,
+    rowMeta: rowRead.details,
+    colMeta: colRead.details,
+    digitCount: rowRead.digitCount + colRead.digitCount,
+    missingRows: rowRead.values.map((v, i) => (v === null ? i + 1 : 0)).filter(Boolean),
+    missingCols: colRead.values.map((v, i) => (v === null ? i + 1 : 0)).filter(Boolean),
+    lowConfRows: lowConf(rowRead),
+    lowConfCols: lowConf(colRead),
+    worstDiff: overallWorst,
+    fontGuess: bestFamily ? bestFamily.family : '?',
+    fontAvg: bestFamily ? bestFamily.avg : NaN,
     greenCells,
   }
 }, dataUrl)
@@ -392,34 +685,126 @@ if (analyzed.error) {
   console.error(`[import] ${analyzed.error}`)
   process.exit(1)
 }
-const { nCols, nRows, cell, trees } = analyzed
-const w = widthOpt || sizeOpt || nCols
-const h = heightOpt || sizeOpt || nRows
+
+/* ───────────────────────── 结果整理 / 人工覆盖 ───────────────────────── */
+
+const { nCols, nRows, cell, trees: detectedTrees } = analyzed
+const w = widthOpt || sizeOpt || Number(map?.width) || nCols
+const h = heightOpt || sizeOpt || Number(map?.height) || nRows
+if (!Number.isInteger(w) || !Number.isInteger(h) || w < 3 || h < 3) {
+  console.error(`[import] 棋盘尺寸不合法：${w}×${h}`)
+  process.exit(1)
+}
 if (w !== nCols || h !== nRows) {
   console.error(`[import] 网格不匹配：识别到 ${nCols}×${nRows}，目标 ${w}×${h}`)
   process.exit(1)
 }
-const treeCount = trees.reduce((a, b) => a + b, 0)
+
+let treesFinal = detectedTrees
+if (map?.trees !== undefined) {
+  const treeStr = treesFromMapValue(map.trees, w, h)
+  treesFinal = [...treeStr].map((ch) => (ch === '#' || ch === 'o' ? 1 : 0))
+  console.log('[import] 使用 --map 覆盖树位')
+}
+const treeCount = treesFinal.reduce((a, b) => a + b, 0)
+
+const okRows = analyzed.rowClues.filter((v) => v !== null).length
+const okCols = analyzed.colClues.filter((v) => v !== null).length
 console.log(
   `[import] ${path.basename(imagePath)}：${analyzed.W}×${analyzed.H}，题板 ${w}×${h}，` +
     `格距 ${cell.toFixed(2)}px，树 ${treeCount} 棵（绿色格 ${analyzed.greenCells}）`,
 )
-console.log(`[import] OCR 字体猜测：${analyzed.fontGuess}（平均误差 ${analyzed.fontAvg.toFixed(4)}）`)
+console.log(
+  `[import] 线索识别：行 ${okRows}/${h} · 列 ${okCols}/${w} · 数字字块 ${analyzed.digitCount} 个` +
+    ` · 最接近字体 ${analyzed.fontGuess}（平均误差 ${Number.isFinite(analyzed.fontAvg) ? analyzed.fontAvg.toFixed(4) : '?'}` +
+    ` · 最差单字 ${analyzed.worstDiff.toFixed(4)}）`,
+)
+if (analyzed.missingRows.length) {
+  console.warn(`[import] 未读到数字的行（1 起）：${analyzed.missingRows.join(', ')}`)
+}
+if (analyzed.missingCols.length) {
+  console.warn(`[import] 未读到数字的列（1 起）：${analyzed.missingCols.join(', ')}`)
+}
+if (analyzed.lowConfRows.length) {
+  console.warn(
+    `[import] 低置信行线索：${analyzed.lowConfRows
+      .map((d) => `第${d.index}行=${d.value}(误差${d.diff})`)
+      .join('、')}`,
+  )
+}
+if (analyzed.lowConfCols.length) {
+  console.warn(
+    `[import] 低置信列线索：${analyzed.lowConfCols
+      .map((d) => `第${d.index}列=${d.value}(误差${d.diff})`)
+      .join('、')}`,
+  )
+}
+if (debug) {
+  const dump = (label, meta) => {
+    console.log(`[import][debug] ${label}逐项：`)
+    meta.forEach((d, i) => {
+      if (!d) {
+        console.log(`  ${String(i + 1).padStart(2)}: (无数字)`)
+        return
+      }
+      console.log(
+        `  ${String(i + 1).padStart(2)}: ${d.value}  digits=[${d.digits.join(',')}]` +
+          ` diff=${d.diff.toFixed(4)} margin=${Number.isFinite(d.margin) ? d.margin.toFixed(4) : '∞'}`,
+      )
+    })
+  }
+  dump('行', analyzed.rowMeta)
+  dump('列', analyzed.colMeta)
+}
 
-const parseClueList = (text) =>
-  text
-    .split(',')
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isFinite(n))
-let rowSums = rowsOverride ? parseClueList(rowsOverride) : analyzed.rowClues
-let colSums = colsOverride ? parseClueList(colsOverride) : analyzed.colClues
+/** 合并 OCR 与新线索 spec：KEEP 保留 OCR 值，null 表示该行/列没有数字 */
+const mergeClues = (ocr, spec, expectedLen, label) => {
+  if (!spec) return ocr.slice()
+  if (spec.length !== expectedLen) {
+    console.error(
+      `[import] ${label}线索数量 ${spec.length} ≠ 目标 ${expectedLen}；请给满 ${expectedLen} 项（?=保留 OCR，x/空=无数字）`,
+    )
+    process.exit(1)
+  }
+  return spec.map((v, i) => (v === KEEP ? (ocr[i] ?? null) : v))
+}
+
+let rowSums = mergeClues(
+  analyzed.rowClues,
+  rowsOverride ? parseClueSpec(rowsOverride) : null,
+  h,
+  '行',
+)
+let colSums = mergeClues(
+  analyzed.colClues,
+  colsOverride ? parseClueSpec(colsOverride) : null,
+  w,
+  '列',
+)
 if (rowsOverride) console.log('[import] 使用 --rows 覆盖行线索')
 if (colsOverride) console.log('[import] 使用 --cols 覆盖列线索')
-console.log(`[import] 行线索：${rowSums.join(',')}`)
-console.log(`[import] 列线索：${colSums.join(',')}`)
-const sumRows = rowSums.reduce((a, b) => a + b, 0)
-const sumCols = colSums.reduce((a, b) => a + b, 0)
-if (rowSums.length === h && colSums.length === w) {
+if (map?.rows !== undefined) {
+  rowSums = mergeClues(rowSums, specFromMapValue(map.rows), h, '行')
+  console.log('[import] 使用 --map 覆盖行线索')
+}
+if (map?.cols !== undefined) {
+  colSums = mergeClues(colSums, specFromMapValue(map.cols), w, '列')
+  console.log('[import] 使用 --map 覆盖列线索')
+}
+
+const fmtClues = (arr) => arr.map((v) => (v === null || v === undefined ? '?' : v)).join(',')
+console.log(`[import] 行线索：${fmtClues(rowSums)}`)
+console.log(`[import] 列线索：${fmtClues(colSums)}`)
+
+const nullRows = rowSums.map((v, i) => (v === null ? i + 1 : 0)).filter(Boolean)
+const nullCols = colSums.map((v, i) => (v === null ? i + 1 : 0)).filter(Boolean)
+if (nullRows.length) console.warn(`[import] 以下行没有线索数字（1 起）：${nullRows.join(', ')}`)
+if (nullCols.length) console.warn(`[import] 以下列没有线索数字（1 起）：${nullCols.join(', ')}`)
+console.log(`[import] 线索就绪：行 ${h - nullRows.length}/${h} · 列 ${w - nullCols.length}/${w}`)
+
+const sumRows = rowSums.reduce((a, b) => a + (b ?? 0), 0)
+const sumCols = colSums.reduce((a, b) => a + (b ?? 0), 0)
+if (!nullRows.length && !nullCols.length) {
   if (sumRows !== sumCols) {
     console.warn(`[import] 警告：行线索合计 ${sumRows} ≠ 列线索合计 ${sumCols}，OCR 可能读错`)
   } else if (sumRows !== treeCount) {
@@ -430,27 +815,21 @@ if (rowSums.length === h && colSums.length === w) {
     console.log(`[import] 校验：行/列合计一致且等于树数 ${treeCount} ✓`)
   }
 } else {
-  console.warn(
-    `[import] 警告：OCR 到 ${rowSums.length} 行 / ${colSums.length} 列线索，与 ${h}×${w} 不符；可用 --rows/--cols 覆盖`,
-  )
+  console.warn('[import] 警告：线索有缺口，行列合计无法校验')
 }
 
 // 预览
 console.log('[import] 树位预览：')
 for (let y = 0; y < h; y++) {
   let line = '  '
-  for (let x = 0; x < w; x++) line += trees[y * w + x] ? ' T' : ' ·'
+  for (let x = 0; x < w; x++) line += treesFinal[y * w + x] ? ' T' : ' ·'
   console.log(line)
 }
 
-const treesStr = trees.map((v) => (v ? '#' : '.')).join('')
-const rowsStr = rowSums.join(',')
-const colsStr = colSums.join(',')
-
-if (dry) {
-  console.log('[import] --dry：仅识别，不写入。')
-  process.exit(0)
-}
+const serializeClues = (arr) => arr.map((v) => (v === null || v === undefined ? '' : String(v))).join(',')
+const treesStr = treesFinal.map((v) => (v ? '#' : '.')).join('')
+const rowsStr = serializeClues(rowSums)
+const colsStr = serializeClues(colSums)
 
 if (verify) {
   const bundleFile = path.join(ROOT, 'node_modules', '.cache', 'import-verify-tents.mjs')
@@ -475,7 +854,7 @@ if (verify) {
     width: w,
     height: h,
     difficulty: 'custom',
-    trees: trees.map(Boolean),
+    trees: treesFinal.map(Boolean),
     rowClues: rowSums,
     colClues: colSums,
   }
@@ -485,12 +864,20 @@ if (verify) {
   if (res.timedOut) {
     console.warn(`[import] 唯一性检查超时（${res.nodes} 节点 / ${ms}ms），无法确认唯一解`)
   } else if (res.count === 0) {
-    console.error('[import] 无解：树位置或线索识别可能有误')
+    console.error(
+      '[import] 无解：树位置或线索识别可能有误；也可能是题面来源用了更宽松的判定' +
+        '（例如允许帐篷同时挨多棵树，只按连通域配平），这种题面放到本题库规则下不可解',
+    )
   } else if (res.count >= 2) {
     console.warn(`[import] 解不唯一：至少 ${res.count} 个（${res.nodes} 节点 / ${ms}ms）`)
   } else {
     console.log(`[import] 唯一解检查通过（${res.nodes} 节点 / ${ms}ms）`)
   }
+}
+
+if (dry) {
+  console.log(`[import] --dry：仅识别${verify ? '并做唯一解检查' : ''}，不写入。`)
+  process.exit(0)
 }
 
 if (!append) {
