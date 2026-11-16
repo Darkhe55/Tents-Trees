@@ -865,8 +865,7 @@ if (verify) {
     console.warn(`[import] 唯一性检查超时（${res.nodes} 节点 / ${ms}ms），无法确认唯一解`)
   } else if (res.count === 0) {
     console.error(
-      '[import] 无解：树位置或线索识别可能有误；也可能是题面来源用了更宽松的判定' +
-        '（例如允许帐篷同时挨多棵树，只按连通域配平），这种题面放到本题库规则下不可解',
+      '[import] 无解：树位置或线索识别可能有误；也可能题面本身不满足「树–帐篷一一配对」的官方规则',
     )
   } else if (res.count >= 2) {
     console.warn(`[import] 解不唯一：至少 ${res.count} 个（${res.nodes} 节点 / ${ms}ms）`)

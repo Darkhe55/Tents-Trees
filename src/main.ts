@@ -102,7 +102,7 @@ app.innerHTML = `
   <header class="topbar">
     <div class="brand">
       <h1>帐篷</h1>
-      <p>Tents · 每棵树配一个相邻帐篷 · 每个帐篷只挨一棵树 · 帐篷互不相邻 · 行列数字 = 帐篷数</p>
+      <p>Tents · 树–帐篷一一配对 · 帐篷互不相邻 · 行列数字 = 帐篷数</p>
     </div>
     <div class="brand">
       <p style="margin:0">左键标记帐篷，右键标记空地</p>
@@ -285,8 +285,8 @@ function refresh() {
     return
   }
   const bits: string[] = [`已定 ${result.filled}/${session.puzzle.width * session.puzzle.height - treeCount(session.puzzle)} 块空地`]
-  if (result.badTrees.length) bits.push(`${result.badTrees.length} 棵树的帐篷数不对`)
-  if (result.badTents.length) bits.push(`${result.badTents.length} 个帐篷挨错了树`)
+  if (result.badTrees.length) bits.push(`${result.badTrees.length} 棵树配不到帐篷`)
+  if (result.badTents.length) bits.push(`${result.badTents.length} 顶帐篷配不到树`)
   if (result.adjacentTents.length) bits.push('有帐篷挨在一起')
   if (result.badRows.length) bits.push(`${result.badRows.length} 行数字不符`)
   if (result.badCols.length) bits.push(`${result.badCols.length} 列数字不符`)
@@ -404,8 +404,8 @@ function check(): void {
   }
   const bits: string[] = ['检查结果：']
   if (result.unknown) bits.push(`还有 ${result.unknown} 块空地未定`)
-  if (result.badTrees.length) bits.push(`${result.badTrees.length} 棵树的帐篷数不对（已标红）`)
-  if (result.badTents.length) bits.push(`${result.badTents.length} 个帐篷挨错了树`)
+  if (result.badTrees.length) bits.push(`${result.badTrees.length} 棵树配不到帐篷（已标红）`)
+  if (result.badTents.length) bits.push(`${result.badTents.length} 顶帐篷配不到树`)
   if (result.adjacentTents.length) bits.push('有帐篷挨在一起')
   if (result.badRows.length) bits.push(`${result.badRows.length} 行数字不符`)
   if (result.badCols.length) bits.push(`${result.badCols.length} 列数字不符`)
@@ -853,7 +853,7 @@ function checkCustomUnique(): void {
     customMsg(`校验超时（${Date.now() - t0}ms）：树太多或盘面太大，求解器跑不动。`, 'bad')
     return
   }
-  if (r.count === 0) customMsg('无解：这些树配不出合法帐篷（可能有树挨太近或没有空位）。', 'bad')
+  if (r.count === 0) customMsg('无解：这些树配不出一一对应的帐篷（可能有树周围没有空地，或帐篷不够分）。', 'bad')
   else if (r.count === 1) customMsg(`唯一解 ✓（${Date.now() - t0}ms）`, 'ok')
   else customMsg(`有 ${r.count}+ 个解，不是唯一解。`, 'bad')
 }

@@ -6,7 +6,7 @@
  *   1. 随机撒树（给定密度）
  *   2. 回溯给每棵树配一个「只挨一棵树、不挨别的帐篷」的相邻空格
  *   3. 由帐篷摆放算出行/列线索（本题库给满）
- *   4. 用 countSolutions 校验唯一解，不唯一就重来
+ *   4. 用 countSolutions（官方匹配语义：树–帐篷二分图一一配对）校验唯一解，不唯一就重来
  */
 import { countSolutions } from '../src/solver.ts'
 import { cellIndex, neighbors4, neighbors8 } from '../src/state.ts'
