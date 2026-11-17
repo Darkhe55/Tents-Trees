@@ -704,7 +704,7 @@ async function runLogicSolver(): Promise<void> {
   }
   if (!plan.steps.length) {
     setStatus(
-      plan.complete ? '逻辑解题：都推完了，没有新结论。' : '逻辑解题：三条规则推不动了，剩下的要假设推演。',
+      plan.complete ? '逻辑解题：都推完了，没有新结论。' : '逻辑解题：标准定式推不动了，剩下的要假设推演。',
       'solving',
     )
     return

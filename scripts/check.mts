@@ -3,6 +3,8 @@
  *   1. 串长度与题面尺寸吻合
  *   2. 有参考解的题：参考解通过 validate（官方匹配语义）
  *   3. 解唯一（countSolutions === 1，按帐篷摆法去重）
+ *   4. 逻辑解谜器健全性：从空盘推一遍，每条结论都必须与参考解一致、
+ *      不能报盘面冲突（防止以后加规则加出误推）
  *
  * 识图导入的题没有参考解（solution 为空），只审计尺寸 + 唯一解。
  *
@@ -12,6 +14,7 @@ import { puzzles } from '../src/puzzles.ts'
 import { countSolutions } from '../src/solver.ts'
 import { createEmptyState } from '../src/state.ts'
 import { validate } from '../src/validate.ts'
+import { planLogicSolve } from '../src/logic.ts'
 import { CellState as CS } from '../src/types.ts'
 
 let fail = 0
@@ -58,7 +61,34 @@ for (const p of puzzles) {
   bad ||= failIf(r.timedOut, '唯一解校验超时')
   bad ||= failIf(r.count !== 1, `解数 = ${r.count}（应为 1）`)
 
-  console.log(`  ✓ ${hasSolution ? '参考解合法 · ' : ''}唯一解 · 树/帐篷 ${treeCount} · 线索行 ${p.rowClues.join(',')}`)
+  // 逻辑解谜器审计：从空盘推，结论必须与参考解一致，且不能报冲突
+  if (hasSolution) {
+    const t0 = Date.now()
+    const plan = planLogicSolve(p)
+    const logicMs = Date.now() - t0
+    bad ||= failIf(plan.conflicts.length > 0, `逻辑解题报冲突：${plan.conflicts[0]}`)
+    let badStep = -1
+    for (const step of plan.steps) {
+      if (p.trees[step.index]) {
+        badStep = step.index
+        break
+      }
+      const expect = p.solution![step.index] ? CS.Tent : CS.Grass
+      if (step.value !== expect) {
+        badStep = step.index
+        break
+      }
+    }
+    bad ||= failIf(badStep >= 0, `逻辑解题第 ${badStep} 格与参考解不一致（规则不健全）`)
+    console.log(
+      `  ✓ ${hasSolution ? '参考解合法 · ' : ''}唯一解 · 树/帐篷 ${treeCount} · 线索行 ${p.rowClues.join(',')}`,
+    )
+    console.log(
+      `    逻辑：${plan.steps.length} 步 · ${plan.complete ? '可推满' : '推不动（需假设）'} · ${logicMs}ms`,
+    )
+  } else {
+    console.log(`  ✓ 唯一解 · 树/帐篷 ${treeCount} · 线索行 ${p.rowClues.join(',')}`)
+  }
 }
 
 console.log('')
